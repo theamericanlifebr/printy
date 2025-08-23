@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Logística - Turma do Printy</title>
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css" />
+  </head>
+<body>
+  <header class="main-header fade">
+    <nav>
+      <ul>
+        <li><button id="menu-items">Itens</button></li>
+        <li><button id="menu-music">Músicas</button></li>
+        <li><button id="menu-bags">Bags</button></li>
+        <li><button id="menu-more">Mais</button></li>
+      </ul>
+    </nav>
+  </header>
+
+  <div id="bags-page" class="bags-container"></div>
+  <div class="nav-buttons">
+    <button onclick="prevPage()">⬅️ Anterior</button>
+    <button onclick="nextPage()">Próximo ➡️</button>
+  </div>
+
+  <div id="modal" class="modal" onclick="closeBag(event)">
+    <div id="modal-content" class="modal-content">
+      <h1 id="bag-title"></h1>
+      <div id="items-list"></div>
+      <div class="progress">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="progress-footer">
+    <div class="progress">
+      <div class="progress-bar" id="global-progress-bar"></div>
+    </div>
+  </div>
+
+  <div id="music-overlay" class="music-overlay"></div>
+  <div id="items-overlay" class="items-overlay"></div>
+  <div id="item-action-menu" class="item-action-menu">
+    <div class="menu-box">
+      <button onclick="selectItemAction('lavar')">Lavar</button>
+      <button onclick="selectItemAction('consertar')">Consertar</button>
+    </div>
+  </div>
+  <div id="loader-overlay" class="loader-overlay">
+    <div class="loader-circle">
+      <svg width="150" height="150">
+        <circle cx="75" cy="75" r="55" />
+      </svg>
+      <span id="loader-text">0%</span>
+      <div id="loader-mb"></div>
+    </div>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+</html>
