@@ -80,23 +80,23 @@ h1 {
   left: 0;
   width: 100%;
   height: 100%;
-  background: rgba(0,0,0,0.9);
+  background: linear-gradient(#ffffff, #cccccc);
   display: none;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 20px;
+  padding: 0;
 }
 
 .modal-content {
-  border-radius: 16px;
+  border-radius: 0;
   padding: 20px;
   width: 100%;
   height: 100%;
   max-width: none;
   text-align: center;
-  color: #fff;
-  background: linear-gradient(135deg, #eeeeee, #ffffff);
+  color: #000;
+  background: linear-gradient(#ffffff, #cccccc);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -255,7 +255,7 @@ h1 {
 }
 
 .boxmusic.flash {
-  animation: flash-green 0.3s;
+  animation: flash-green 0.5s;
 }
 
 .main-header {
