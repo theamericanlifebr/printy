@@ -40,8 +40,11 @@ let currentMusicPage = 0;
 const songTapCounts = {};
 const songTapTimers = {};
 let musicTouchStartX = 0;
-const secretSequence = [0, 1, 2, 3, 5];
-let secretIndex = 0;
+let musicTouchStartY = 0;
+const toggleSequence = [0, 1, 2, 3, 5];
+let toggleIndex = 0;
+const pauseSequence = [0, 1, 2, 1, 0];
+let pauseIndex = 0;
 let moveSongUpEnabled = true;
 
 let bagItems = [];
@@ -132,9 +135,7 @@ modal.addEventListener('touchend', e => {
 
 function openBag(title, bagIndex) {
   document.getElementById('modal').style.display = 'flex';
-  const bag = bagsInfo[bagIndex];
-  const modalContent = document.getElementById('modal-content');
-  modalContent.style.background = bag.modalColor || bag.boxColor || defaultColor;
+  document.getElementById('modal-content').style.background = 'linear-gradient(#ffffff, #cccccc)';
   document.getElementById('bag-title').innerText = title;
   currentBagIndex = bagIndex;
   currentItemPage = 0;
@@ -431,9 +432,24 @@ async function init() {
 
 function disableAllButtons(disable) {
   document.querySelectorAll('button').forEach(btn => btn.disabled = disable);
-  document.querySelectorAll('.bag, .boxmusic').forEach(el => {
-    el.style.pointerEvents = disable ? 'none' : 'auto';
+}
+
+function flashMusicBoxes() {
+  document.querySelectorAll('.boxmusic').forEach(box => {
+    const original = box.style.background;
+    box.style.background = 'orange';
+    setTimeout(() => {
+      box.style.background = original;
+    }, 500);
   });
+}
+
+function updateOverlayBackground() {
+  const overlay = document.getElementById('music-overlay');
+  if (!overlay) return;
+  overlay.style.background = moveSongUpEnabled
+    ? 'linear-gradient(#ffffff, #cccccc)'
+    : 'linear-gradient(#add8e6, #b0e0e6)';
 }
 
 function renderMusicOverlay() {
@@ -451,11 +467,12 @@ function renderMusicOverlay() {
     let pressTimer;
     let longPress = false;
     const startPress = () => {
+      if (currentAudio) return;
       longPress = false;
       pressTimer = setTimeout(() => {
         longPress = true;
         box.classList.add('flash');
-        setTimeout(() => box.classList.remove('flash'), 300);
+        setTimeout(() => box.classList.remove('flash'), 500);
         playMusic(idx);
       }, 1000);
     };
@@ -491,17 +508,27 @@ function showMusicOverlay() {
   if (!overlay.dataset.init) {
     overlay.addEventListener('touchstart', e => {
       musicTouchStartX = e.changedTouches[0].screenX;
+      musicTouchStartY = e.changedTouches[0].screenY;
     });
     overlay.addEventListener('touchend', e => {
       const endX = e.changedTouches[0].screenX;
+      const endY = e.changedTouches[0].screenY;
+      const dx = endX - musicTouchStartX;
+      const dy = endY - musicTouchStartY;
+      if (currentAudio && (Math.abs(dx) > 50 || Math.abs(dy) > 50)) {
+        flashMusicBoxes();
+      }
       // deslize para a esquerda para acessar a próxima página de músicas
-      if (endX < musicTouchStartX - 50) nextMusicPage();
-      if (endX > musicTouchStartX + 50) prevMusicPage();
+      if (Math.abs(dx) > Math.abs(dy)) {
+        if (dx < 0) nextMusicPage();
+        if (dx > 0) prevMusicPage();
+      }
     });
     overlay.dataset.init = 'true';
   }
   currentMusicPage = 0;
   renderMusicOverlay();
+  updateOverlayBackground();
   overlay.style.display = 'flex';
   requestAnimationFrame(() => (overlay.style.opacity = 1));
 }
@@ -579,25 +606,47 @@ function playMusic(idx) {
   currentAudio.play();
 }
 
-function updateSecretSequence(idx) {
-  if (idx === secretSequence[secretIndex]) {
-    secretIndex++;
-    if (secretIndex === secretSequence.length) {
+function updateToggleSequence(idx) {
+  if (idx === toggleSequence[toggleIndex]) {
+    toggleIndex++;
+    if (toggleIndex === toggleSequence.length) {
       moveSongUpEnabled = !moveSongUpEnabled;
-      secretIndex = 0;
+      toggleIndex = 0;
+      updateOverlayBackground();
     }
   } else {
-    secretIndex = idx === secretSequence[0] ? 1 : 0;
+    toggleIndex = idx === toggleSequence[0] ? 1 : 0;
+  }
+}
+
+function updatePauseSequence(idx) {
+  if (!currentAudio) {
+    pauseIndex = idx === pauseSequence[0] ? 1 : 0;
+    return;
+  }
+  if (idx === pauseSequence[pauseIndex]) {
+    pauseIndex++;
+    if (pauseIndex === pauseSequence.length) {
+      currentAudio.pause();
+      disableAllButtons(false);
+      document.querySelectorAll('.boxmusic').forEach(box => box.classList.remove('playing'));
+      currentAudio = null;
+      pauseIndex = 0;
+    }
+  } else {
+    pauseIndex = idx === pauseSequence[0] ? 1 : 0;
   }
 }
 
 function handleMusicTap(idx) {
-  updateSecretSequence(idx);
+  updateToggleSequence(idx);
+  updatePauseSequence(idx);
+  if (currentAudio) return;
   if (!moveSongUpEnabled) return;
   songTapCounts[idx] = (songTapCounts[idx] || 0) + 1;
   clearTimeout(songTapTimers[idx]);
   songTapTimers[idx] = setTimeout(() => {
-    if (songTapCounts[idx] >= 3) {
+    if (songTapCounts[idx] >= 2) {
       moveSongUp(idx);
     }
     songTapCounts[idx] = 0;
@@ -609,45 +658,11 @@ function moveSongUp(idx) {
   [musicList[idx - 1], musicList[idx]] = [musicList[idx], musicList[idx - 1]];
   if (idx - 1 < currentMusicPage * songsPerPage) currentMusicPage--;
   renderMusicOverlay();
-}
-
-let tapCount = 0;
-let tapStartTime = null;
-document.addEventListener('click', () => {
-  const now = Date.now();
-  if (!tapStartTime || now - tapStartTime > 3000) {
-    tapStartTime = now;
-    tapCount = 1;
-  } else {
-    tapCount++;
+  const box = document.getElementById(`music-box-${idx - 1}`);
+  if (box) {
+    box.classList.add('flash');
+    setTimeout(() => box.classList.remove('flash'), 500);
   }
-  if (tapCount >= 5 && currentAudio && now - tapStartTime < 3000) {
-    fadeOutCurrentAudio();
-    tapCount = 0;
-    tapStartTime = null;
-  }
-});
-
-function fadeOutCurrentAudio() {
-  if (!currentAudio) return;
-  const audio = currentAudio;
-  const startVolume = audio.volume;
-  const duration = 3000;
-  const step = 50;
-  const decrement = startVolume / (duration / step);
-  const interval = setInterval(() => {
-    if (audio.volume - decrement > 0) {
-      audio.volume -= decrement;
-    } else {
-      audio.volume = 0;
-      clearInterval(interval);
-      audio.pause();
-      audio.volume = startVolume;
-      disableAllButtons(false);
-      document.querySelectorAll('.boxmusic').forEach(box => box.classList.remove('playing'));
-      currentAudio = null;
-    }
-  }, step);
 }
 
 // Initial render
