@@ -30,6 +30,7 @@ const musicList = [
   'Louvarei'
 ];
 
+const BUFFER_BYTES = 500000; // ~30s at 128kbps
 function songUrl(title) {
   return 'Songs/' + encodeURIComponent(title + '.mp3');
 }
@@ -53,6 +54,10 @@ let moveSongUpEnabled = true;
 let bagItems = [];
 let currentItemPage = 0;
 let currentBagItems = [];
+let currentLongPressItem = null;
+let itemStatus = {};
+const itemTapCounts = {};
+const itemTapTimers = {};
 
 document.addEventListener('copy', e => e.preventDefault());
 document.addEventListener('cut', e => e.preventDefault());
@@ -214,7 +219,51 @@ function toggleItem(index) {
 }
 
 function handleItemTap(idx) {
-  toggleItem(idx);
+  itemTapCounts[idx] = (itemTapCounts[idx] || 0) + 1;
+  if (itemTapCounts[idx] === 1) {
+    toggleItem(idx);
+  }
+  clearTimeout(itemTapTimers[idx]);
+  itemTapTimers[idx] = setTimeout(() => {
+    itemTapCounts[idx] = 0;
+  }, 5000);
+  if (itemTapCounts[idx] === 4) {
+    itemTapCounts[idx] = 0;
+    currentLongPressItem = idx;
+    showItemActionMenu();
+  }
+}
+
+function showItemActionMenu() {
+  const menu = document.getElementById('item-action-menu');
+  menu.style.display = 'flex';
+  requestAnimationFrame(() => (menu.style.opacity = 1));
+}
+
+function hideItemActionMenu() {
+  const menu = document.getElementById('item-action-menu');
+  menu.style.opacity = 0;
+  setTimeout(() => {
+    menu.style.display = 'none';
+    currentLongPressItem = null;
+  }, 300);
+}
+
+function selectItemAction(action) {
+  if (currentLongPressItem !== null) {
+    const key = currentBagIndex + '-' + currentLongPressItem;
+    itemStatus[key] = action;
+    saveItemStatus();
+  }
+  hideItemActionMenu();
+}
+
+function loadItemStatus() {
+  itemStatus = JSON.parse(localStorage.getItem('itemStatus') || '{}');
+}
+
+function saveItemStatus() {
+  localStorage.setItem('itemStatus', JSON.stringify(itemStatus));
 }
 
 function updateProgress() {
@@ -286,34 +335,51 @@ async function preloadContent() {
 
 async function cacheAssets() {
   const assets = [];
-  bagsInfo.forEach(bag => {
+  bagsInfo.forEach((bag) => {
     const folder = encodeURIComponent(bag.title);
     bag.items.forEach(item => {
-      assets.push(`Imagens/${folder}/${encodeURIComponent(item)}`);
+      assets.push({ url: `Imagens/${folder}/${encodeURIComponent(item)}`, song: false });
     });
   });
+  musicList.forEach(title => assets.push({ url: songUrl(title), song: true }));
 
   let total = 0;
-  for (const url of assets) {
-    try {
-      const head = await fetch(url, { method: 'HEAD' });
-      const len = head.headers.get('content-length');
-      total += len ? parseInt(len) : 0;
-    } catch (e) {}
+  for (const asset of assets) {
+    if (asset.song) {
+      total += BUFFER_BYTES;
+    } else {
+      try {
+        const head = await fetch(asset.url, { method: 'HEAD' });
+        const len = head.headers.get('content-length');
+        total += len ? parseInt(len) : 0;
+      } catch (e) {}
+    }
   }
 
   let loaded = 0;
-  for (const url of assets) {
+  for (const asset of assets) {
     try {
-      const res = await fetch(url);
-      const blob = await res.blob();
-      loaded += blob.size;
-      const reader = new FileReader();
-      const dataUrl = await new Promise(resolve => {
-        reader.onload = () => resolve(reader.result);
-        reader.readAsDataURL(blob);
-      });
-      localStorage.setItem('asset:' + url, dataUrl);
+      if (asset.song) {
+        const res = await fetch(asset.url, { headers: { Range: `bytes=0-${BUFFER_BYTES - 1}` } });
+        const blob = await res.blob();
+        loaded += blob.size;
+        const reader = new FileReader();
+        const dataUrl = await new Promise(resolve => {
+          reader.onload = () => resolve(reader.result);
+          reader.readAsDataURL(blob);
+        });
+        localStorage.setItem('song-buffer:' + asset.url, dataUrl);
+      } else {
+        const res = await fetch(asset.url);
+        const blob = await res.blob();
+        loaded += blob.size;
+        const reader = new FileReader();
+        const dataUrl = await new Promise(resolve => {
+          reader.onload = () => resolve(reader.result);
+          reader.readAsDataURL(blob);
+        });
+        localStorage.setItem('asset:' + asset.url, dataUrl);
+      }
     } catch (e) {}
     updateLoader(loaded, total);
   }
@@ -333,12 +399,21 @@ function setupMenu() {
   document.getElementById('menu-bags').addEventListener('click', () => {
     document.getElementById('bags-page').style.display = 'flex';
     hideMusicOverlay();
+    hideItemsOverlay();
   });
   document.getElementById('menu-music').addEventListener('click', showMusicOverlay);
+  document.getElementById('menu-items').addEventListener('click', showItemsOverlay);
   document.getElementById('menu-more').addEventListener('click', () => {});
+  document.getElementById('items-overlay').addEventListener('click', e => {
+    if (e.target.id === 'items-overlay') hideItemsOverlay();
+  });
+  document.getElementById('item-action-menu').addEventListener('click', e => {
+    if (e.target.id === 'item-action-menu') hideItemActionMenu();
+  });
 }
 
 async function init() {
+  loadItemStatus();
   await loadBagItems();
   if (!localStorage.getItem('assetsCached')) {
     await cacheAssets();
@@ -389,74 +464,6 @@ function flashMusicBoxes() {
   });
 }
 
-let downloadPromises = {};
-const startGradient = ['#808080', '#d3d3d3'];
-const endGradient = ['#155fe8', '#4a90ff'];
-
-function hexToRgb(hex) {
-  const num = parseInt(hex.slice(1), 16);
-  return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
-}
-
-function rgbToHex(r, g, b) {
-  return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
-}
-
-function mixColors(c1, c2, p) {
-  const [r1, g1, b1] = hexToRgb(c1);
-  const [r2, g2, b2] = hexToRgb(c2);
-  const r = Math.round(r1 + (r2 - r1) * p);
-  const g = Math.round(g1 + (g2 - g1) * p);
-  const b = Math.round(b1 + (b2 - b1) * p);
-  return rgbToHex(r, g, b);
-}
-
-function updateDownloadProgress(idx, p) {
-  const box = document.getElementById(`music-box-${idx}`);
-  if (!box) return;
-  const c1 = mixColors(startGradient[0], endGradient[0], p);
-  const c2 = mixColors(startGradient[1], endGradient[1], p);
-  box.style.background = `linear-gradient(${c1}, ${c2})`;
-  if (p >= 1) box.classList.remove('not-downloaded');
-}
-
-function ensureSongDownloaded(idx) {
-  const title = musicList[idx];
-  const stored = localStorage.getItem('song:' + title);
-  if (stored) return Promise.resolve(stored);
-  if (!downloadPromises[title]) {
-    downloadPromises[title] = downloadSong(title, idx).finally(() => {
-      delete downloadPromises[title];
-    });
-  }
-  return downloadPromises[title];
-}
-
-async function downloadSong(title, idx) {
-  const url = songUrl(title);
-  const res = await fetch(url);
-  const total = +res.headers.get('Content-Length') || 0;
-  const reader = res.body.getReader();
-  let received = 0;
-  const chunks = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    if (total) updateDownloadProgress(idx, received / total);
-  }
-  const blob = new Blob(chunks);
-  const dataUrl = await new Promise(resolve => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(fr.result);
-    fr.readAsDataURL(blob);
-  });
-  localStorage.setItem('song:' + title, dataUrl);
-  updateDownloadProgress(idx, 1);
-  return dataUrl;
-}
-
 function updateOverlayBackground() {
   const overlay = document.getElementById('music-overlay');
   if (!overlay) return;
@@ -473,8 +480,7 @@ function renderMusicOverlay() {
   musicList.slice(start, end).forEach((title, i) => {
     const idx = start + i;
     const box = document.createElement('div');
-    const downloaded = localStorage.getItem('song:' + title);
-    box.className = downloaded ? 'boxmusic' : 'boxmusic not-downloaded';
+    box.className = 'boxmusic';
     box.id = `music-box-${idx}`;
     box.innerText = title;
 
@@ -511,7 +517,7 @@ function renderMusicOverlay() {
 
     const progress = document.createElement('div');
     progress.className = 'music-progress';
-    progress.innerHTML = `<div class="music-progress-bar" id="music-progress-${idx}"></div>`;
+    progress.innerHTML = `<div class="music-buffer-bar" id="music-buffer-${idx}"></div><div class="music-progress-bar" id="music-progress-${idx}"></div>`;
     box.appendChild(progress);
     overlay.appendChild(box);
   });
@@ -553,6 +559,35 @@ function hideMusicOverlay() {
   setTimeout(() => (overlay.style.display = 'none'), 300);
 }
 
+function showItemsOverlay() {
+  const overlay = document.getElementById('items-overlay');
+  overlay.innerHTML = '';
+  Object.keys(itemStatus).forEach(key => {
+    const [bagIdx, itemIdx] = key.split('-').map(Number);
+    const container = document.createElement('div');
+    container.className = 'flagged-item';
+    const folder = encodeURIComponent(bagsInfo[bagIdx].title);
+    const img = document.createElement('img');
+    img.src = `Imagens/${folder}/${encodeURIComponent(bagItems[bagIdx][itemIdx])}`;
+    img.alt = 'item';
+    container.appendChild(img);
+    const btn = document.createElement('button');
+    const action = itemStatus[key];
+    btn.className = `action-btn ${action}`;
+    btn.textContent = action.charAt(0).toUpperCase() + action.slice(1);
+    container.appendChild(btn);
+    overlay.appendChild(container);
+  });
+  overlay.style.display = 'flex';
+  requestAnimationFrame(() => (overlay.style.opacity = 1));
+}
+
+function hideItemsOverlay() {
+  const overlay = document.getElementById('items-overlay');
+  overlay.style.opacity = 0;
+  setTimeout(() => (overlay.style.display = 'none'), 300);
+}
+
 function nextMusicPage() {
   if ((currentMusicPage + 1) * songsPerPage < musicList.length) {
     currentMusicPage++;
@@ -567,20 +602,34 @@ function prevMusicPage() {
   }
 }
 
-async function playMusic(idx) {
-  const title = musicList[idx];
-  const src = await ensureSongDownloaded(idx);
+function playMusic(idx) {
   const startPlayback = () => {
+    const title = musicList[idx];
+    const url = songUrl(title);
+    const storedFull = localStorage.getItem('song-full:' + title);
+    const storedBuffer = localStorage.getItem('song-buffer:' + url);
+    const src = storedFull || storedBuffer || url;
     currentAudio = new Audio(src);
     currentAudio.dataset.title = title;
     const progressBar = document.getElementById(`music-progress-${idx}`);
+    const bufferBar = document.getElementById(`music-buffer-${idx}`);
     document.querySelectorAll('.music-progress-bar').forEach(bar => bar.style.width = '0%');
+    document.querySelectorAll('.music-buffer-bar').forEach(bar => bar.style.width = '0%');
     document.querySelectorAll('.boxmusic').forEach(box => box.classList.remove('playing'));
     const selectedBox = document.getElementById(`music-box-${idx}`);
     if (selectedBox) selectedBox.classList.add('playing');
     currentAudio.addEventListener('timeupdate', () => {
       const pct = (currentAudio.currentTime / currentAudio.duration) * 100;
       progressBar.style.width = pct + '%';
+      if (!localStorage.getItem('song-full:' + title) && currentAudio.currentTime > 10) {
+        smartBuffer(title);
+      }
+    });
+    currentAudio.addEventListener('progress', () => {
+      if (currentAudio.buffered.length) {
+        const pct = (currentAudio.buffered.end(currentAudio.buffered.length - 1) / currentAudio.duration) * 100;
+        bufferBar.style.width = pct + '%';
+      }
     });
     currentAudio.addEventListener('ended', () => {
       disableAllButtons(false);
@@ -596,6 +645,17 @@ async function playMusic(idx) {
   } else {
     startPlayback();
   }
+}
+
+function smartBuffer(title) {
+  if (localStorage.getItem('song-full:' + title)) return;
+  fetch(songUrl(title))
+    .then(res => res.blob())
+    .then(blob => {
+      const reader = new FileReader();
+      reader.onload = () => localStorage.setItem('song-full:' + title, reader.result);
+      reader.readAsDataURL(blob);
+    });
 }
 
 function updateToggleSequence(idx) {
@@ -628,7 +688,6 @@ function updatePauseSequence(idx) {
 }
 
 function handleMusicTap(idx) {
-  ensureSongDownloaded(idx);
   updateToggleSequence(idx);
   updatePauseSequence(idx);
   if (currentAudio) return;
