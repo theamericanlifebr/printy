@@ -30,7 +30,6 @@ const musicList = [
   'Louvarei'
 ];
 
-const BUFFER_BYTES = 500000; // ~30s at 128kbps
 function songUrl(title) {
   return 'Songs/' + encodeURIComponent(title + '.mp3');
 }
@@ -54,10 +53,7 @@ let moveSongUpEnabled = true;
 let bagItems = [];
 let currentItemPage = 0;
 let currentBagItems = [];
-let currentLongPressItem = null;
 let itemStatus = {};
-const itemTapCounts = {};
-const itemTapTimers = {};
 
 document.addEventListener('copy', e => e.preventDefault());
 document.addEventListener('cut', e => e.preventDefault());
@@ -219,51 +215,7 @@ function toggleItem(index) {
 }
 
 function handleItemTap(idx) {
-  itemTapCounts[idx] = (itemTapCounts[idx] || 0) + 1;
-  if (itemTapCounts[idx] === 1) {
-    toggleItem(idx);
-  }
-  clearTimeout(itemTapTimers[idx]);
-  itemTapTimers[idx] = setTimeout(() => {
-    itemTapCounts[idx] = 0;
-  }, 5000);
-  if (itemTapCounts[idx] === 4) {
-    itemTapCounts[idx] = 0;
-    currentLongPressItem = idx;
-    showItemActionMenu();
-  }
-}
-
-function showItemActionMenu() {
-  const menu = document.getElementById('item-action-menu');
-  menu.style.display = 'flex';
-  requestAnimationFrame(() => (menu.style.opacity = 1));
-}
-
-function hideItemActionMenu() {
-  const menu = document.getElementById('item-action-menu');
-  menu.style.opacity = 0;
-  setTimeout(() => {
-    menu.style.display = 'none';
-    currentLongPressItem = null;
-  }, 300);
-}
-
-function selectItemAction(action) {
-  if (currentLongPressItem !== null) {
-    const key = currentBagIndex + '-' + currentLongPressItem;
-    itemStatus[key] = action;
-    saveItemStatus();
-  }
-  hideItemActionMenu();
-}
-
-function loadItemStatus() {
-  itemStatus = JSON.parse(localStorage.getItem('itemStatus') || '{}');
-}
-
-function saveItemStatus() {
-  localStorage.setItem('itemStatus', JSON.stringify(itemStatus));
+  toggleItem(idx);
 }
 
 function updateProgress() {
@@ -333,53 +285,36 @@ async function preloadContent() {
   await Promise.all(promises);
 }
 
-async function cacheAssets() {
+async function cacheImages() {
   const assets = [];
-  bagsInfo.forEach((bag) => {
+  bagsInfo.forEach(bag => {
     const folder = encodeURIComponent(bag.title);
     bag.items.forEach(item => {
-      assets.push({ url: `Imagens/${folder}/${encodeURIComponent(item)}`, song: false });
+      assets.push(`Imagens/${folder}/${encodeURIComponent(item)}`);
     });
   });
-  musicList.forEach(title => assets.push({ url: songUrl(title), song: true }));
 
   let total = 0;
-  for (const asset of assets) {
-    if (asset.song) {
-      total += BUFFER_BYTES;
-    } else {
-      try {
-        const head = await fetch(asset.url, { method: 'HEAD' });
-        const len = head.headers.get('content-length');
-        total += len ? parseInt(len) : 0;
-      } catch (e) {}
-    }
+  for (const url of assets) {
+    try {
+      const head = await fetch(url, { method: 'HEAD' });
+      const len = head.headers.get('content-length');
+      total += len ? parseInt(len) : 0;
+    } catch (e) {}
   }
 
   let loaded = 0;
-  for (const asset of assets) {
+  for (const url of assets) {
     try {
-      if (asset.song) {
-        const res = await fetch(asset.url, { headers: { Range: `bytes=0-${BUFFER_BYTES - 1}` } });
-        const blob = await res.blob();
-        loaded += blob.size;
-        const reader = new FileReader();
-        const dataUrl = await new Promise(resolve => {
-          reader.onload = () => resolve(reader.result);
-          reader.readAsDataURL(blob);
-        });
-        localStorage.setItem('song-buffer:' + asset.url, dataUrl);
-      } else {
-        const res = await fetch(asset.url);
-        const blob = await res.blob();
-        loaded += blob.size;
-        const reader = new FileReader();
-        const dataUrl = await new Promise(resolve => {
-          reader.onload = () => resolve(reader.result);
-          reader.readAsDataURL(blob);
-        });
-        localStorage.setItem('asset:' + asset.url, dataUrl);
-      }
+      const res = await fetch(url);
+      const blob = await res.blob();
+      loaded += blob.size;
+      const reader = new FileReader();
+      const dataUrl = await new Promise(resolve => {
+        reader.onload = () => resolve(reader.result);
+        reader.readAsDataURL(blob);
+      });
+      localStorage.setItem('asset:' + url, dataUrl);
     } catch (e) {}
     updateLoader(loaded, total);
   }
@@ -407,17 +342,13 @@ function setupMenu() {
   document.getElementById('items-overlay').addEventListener('click', e => {
     if (e.target.id === 'items-overlay') hideItemsOverlay();
   });
-  document.getElementById('item-action-menu').addEventListener('click', e => {
-    if (e.target.id === 'item-action-menu') hideItemActionMenu();
-  });
 }
 
 async function init() {
-  loadItemStatus();
   await loadBagItems();
-  if (!localStorage.getItem('assetsCached')) {
-    await cacheAssets();
-    localStorage.setItem('assetsCached', 'true');
+  if (!localStorage.getItem('imagesCached')) {
+    await cacheImages();
+    localStorage.setItem('imagesCached', 'true');
   } else {
     document.getElementById('loader-overlay').style.display = 'none';
   }
@@ -483,6 +414,10 @@ function renderMusicOverlay() {
     box.className = 'boxmusic';
     box.id = `music-box-${idx}`;
     box.innerText = title;
+
+    if (!localStorage.getItem('song:' + title)) {
+      box.classList.add('pending');
+    }
 
     let pressTimer;
     let longPress = false;
@@ -602,13 +537,53 @@ function prevMusicPage() {
   }
 }
 
+async function downloadSong(title, idx) {
+  const res = await fetch(songUrl(title));
+  const reader = res.body.getReader();
+  const contentLength = +res.headers.get('content-length') || 0;
+  let received = 0;
+  const chunks = [];
+  const box = document.getElementById(`music-box-${idx}`);
+  updateDownloadGradient(box, 0);
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    const pct = contentLength ? (received / contentLength) * 100 : 0;
+    updateDownloadGradient(box, pct);
+  }
+  const blob = new Blob(chunks);
+  const dataUrl = await new Promise(resolve => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.readAsDataURL(blob);
+  });
+  localStorage.setItem('song:' + title, dataUrl);
+  updateDownloadGradient(box, 100);
+  return dataUrl;
+}
+
+function updateDownloadGradient(box, pct) {
+  if (!box) return;
+  if (pct <= 0) {
+    box.style.background = 'linear-gradient(#808080, #d3d3d3)';
+  } else {
+    box.style.background = `linear-gradient(to right, #155fe8 0%, #4a90ff ${pct}%, #808080 ${pct}%, #d3d3d3 100%)`;
+  }
+  if (pct >= 100) {
+    box.classList.remove('pending');
+  }
+}
+
 function playMusic(idx) {
-  const startPlayback = () => {
+  const startPlayback = async () => {
     const title = musicList[idx];
-    const url = songUrl(title);
-    const storedFull = localStorage.getItem('song-full:' + title);
-    const storedBuffer = localStorage.getItem('song-buffer:' + url);
-    const src = storedFull || storedBuffer || url;
+    disableAllButtons(true);
+    let src = localStorage.getItem('song:' + title);
+    if (!src) {
+      src = await downloadSong(title, idx);
+    }
     currentAudio = new Audio(src);
     currentAudio.dataset.title = title;
     const progressBar = document.getElementById(`music-progress-${idx}`);
@@ -621,22 +596,13 @@ function playMusic(idx) {
     currentAudio.addEventListener('timeupdate', () => {
       const pct = (currentAudio.currentTime / currentAudio.duration) * 100;
       progressBar.style.width = pct + '%';
-      if (!localStorage.getItem('song-full:' + title) && currentAudio.currentTime > 10) {
-        smartBuffer(title);
-      }
     });
-    currentAudio.addEventListener('progress', () => {
-      if (currentAudio.buffered.length) {
-        const pct = (currentAudio.buffered.end(currentAudio.buffered.length - 1) / currentAudio.duration) * 100;
-        bufferBar.style.width = pct + '%';
-      }
-    });
+    if (bufferBar) bufferBar.style.width = '100%';
     currentAudio.addEventListener('ended', () => {
       disableAllButtons(false);
       document.querySelectorAll('.boxmusic').forEach(box => box.classList.remove('playing'));
       currentAudio = null;
     });
-    disableAllButtons(true);
     currentAudio.play();
   };
 
@@ -645,17 +611,6 @@ function playMusic(idx) {
   } else {
     startPlayback();
   }
-}
-
-function smartBuffer(title) {
-  if (localStorage.getItem('song-full:' + title)) return;
-  fetch(songUrl(title))
-    .then(res => res.blob())
-    .then(blob => {
-      const reader = new FileReader();
-      reader.onload = () => localStorage.setItem('song-full:' + title, reader.result);
-      reader.readAsDataURL(blob);
-    });
 }
 
 function updateToggleSequence(idx) {
