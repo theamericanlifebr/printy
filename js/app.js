@@ -39,6 +39,8 @@ const songsPerPage = 6;
 let currentMusicPage = 0;
 const songTapCounts = {};
 const songTapTimers = {};
+const CHUNK_SIZE = 1024 * 1024; // ~30s of audio
+const BUFFER_MARGIN = 10;
 let musicTouchStartX = 0;
 let musicTouchStartY = 0;
 const toggleSequence = [0, 1, 2, 3, 5];
@@ -50,14 +52,33 @@ let moveSongUpEnabled = true;
 let bagItems = [];
 let currentItemPage = 0;
 let currentBagItems = [];
-let longPressTimers = {};
 let currentLongPressItem = null;
 let itemStatus = {};
+const itemTapCounts = {};
+const itemTapTimers = {};
 
 document.addEventListener('copy', e => e.preventDefault());
 document.addEventListener('cut', e => e.preventDefault());
 document.addEventListener('paste', e => e.preventDefault());
 document.addEventListener('contextmenu', e => e.preventDefault());
+
+function arrayBufferToBase64(buffer) {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8Array(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
 
 function renderPage() {
   const container = document.getElementById('bags-page');
@@ -160,29 +181,19 @@ function renderItems() {
     img.alt = 'item';
     img.className = `item-img ${checked ? 'checked' : ''}`;
 
-    let longPress = false;
-    const startPress = () => {
-      longPress = false;
-      startItemPress(i, () => {
-        longPress = true;
-      });
-    };
-    const cancelPress = () => {
-      cancelItemPress(i);
-    };
-
-    img.addEventListener('touchstart', startPress);
-    img.addEventListener('touchend', e => {
-      cancelPress();
-      if (!longPress) toggleItem(i);
+    img.addEventListener('click', () => {
+      toggleItem(i);
+      itemTapCounts[i] = (itemTapCounts[i] || 0) + 1;
+      clearTimeout(itemTapTimers[i]);
+      itemTapTimers[i] = setTimeout(() => {
+        itemTapCounts[i] = 0;
+      }, 5000);
+      if (itemTapCounts[i] >= 4) {
+        currentLongPressItem = i;
+        showItemActionMenu();
+        itemTapCounts[i] = 0;
+      }
     });
-    img.addEventListener('touchmove', cancelPress);
-    img.addEventListener('mousedown', startPress);
-    img.addEventListener('mouseup', e => {
-      cancelPress();
-      if (!longPress) toggleItem(i);
-    });
-    img.addEventListener('mouseleave', cancelPress);
 
     list.appendChild(img);
   }
@@ -232,18 +243,6 @@ function toggleItem(index) {
   }
   saveProgress();
   updateProgress();
-}
-
-function startItemPress(idx, cb) {
-  currentLongPressItem = idx;
-  longPressTimers[idx] = setTimeout(() => {
-    cb();
-    showItemActionMenu();
-  }, 3000);
-}
-
-function cancelItemPress(idx) {
-  clearTimeout(longPressTimers[idx]);
 }
 
 function showItemActionMenu() {
@@ -342,37 +341,41 @@ async function preloadContent() {
       promises.push(new Promise(res => { img.onload = img.onerror = res; }));
     });
   });
-  musicList.forEach(title => {
-    const audio = new Audio('Songs/' + encodeURIComponent(title + '.mp3'));
-    promises.push(new Promise(res => {
-      audio.addEventListener('canplaythrough', res, { once: true });
-      audio.addEventListener('error', res, { once: true });
-    }));
-  });
   await Promise.all(promises);
 }
 
 async function cacheAssets() {
-  const assets = [];
-  bagsInfo.forEach((bag) => {
+  const imageAssets = [];
+  const songAssets = [];
+  bagsInfo.forEach(bag => {
     const folder = encodeURIComponent(bag.title);
-    bag.items.forEach(item => {
-      assets.push(`Imagens/${folder}/${encodeURIComponent(item)}`);
-    });
+    bag.items.forEach(item => imageAssets.push(`Imagens/${folder}/${encodeURIComponent(item)}`));
   });
-  musicList.forEach(title => assets.push('Songs/' + encodeURIComponent(title + '.mp3')));
+  musicList.forEach(title => {
+    const url = 'Songs/' + encodeURIComponent(title + '.mp3');
+    songAssets.push({ title, url });
+  });
 
   let total = 0;
-  for (const url of assets) {
+  for (const url of imageAssets) {
     try {
       const head = await fetch(url, { method: 'HEAD' });
       const len = head.headers.get('content-length');
       total += len ? parseInt(len) : 0;
     } catch (e) {}
   }
+  for (const { url } of songAssets) {
+    try {
+      const head = await fetch(url, { method: 'HEAD' });
+      const len = head.headers.get('content-length');
+      total += Math.min(CHUNK_SIZE, len ? parseInt(len) : CHUNK_SIZE);
+    } catch (e) {
+      total += CHUNK_SIZE;
+    }
+  }
 
   let loaded = 0;
-  for (const url of assets) {
+  for (const url of imageAssets) {
     try {
       const res = await fetch(url);
       const blob = await res.blob();
@@ -384,6 +387,20 @@ async function cacheAssets() {
       });
       localStorage.setItem('asset:' + url, dataUrl);
     } catch (e) {}
+    updateLoader(loaded, total);
+  }
+  for (const { title, url } of songAssets) {
+    try {
+      const res = await fetch(url, { headers: { Range: `bytes=0-${CHUNK_SIZE - 1}` } });
+      const buf = await res.arrayBuffer();
+      loaded += buf.byteLength;
+      const b64 = arrayBufferToBase64(buf);
+      localStorage.setItem('songChunks:' + title, JSON.stringify([b64]));
+      const meta = { total: parseInt(res.headers.get('content-range')?.split('/')?.[1] || buf.byteLength), loaded: buf.byteLength };
+      localStorage.setItem('songMeta:' + title, JSON.stringify(meta));
+    } catch (e) {
+      loaded += CHUNK_SIZE;
+    }
     updateLoader(loaded, total);
   }
   document.getElementById('loader-overlay').style.display = 'none';
@@ -432,6 +449,24 @@ async function init() {
 
 function disableAllButtons(disable) {
   document.querySelectorAll('button').forEach(btn => btn.disabled = disable);
+}
+
+function fadeOut(audio, cb) {
+  const duration = 3000;
+  const steps = 30;
+  const stepTime = duration / steps;
+  const initialVolume = audio.volume;
+  let currentStep = 0;
+  const interval = setInterval(() => {
+    currentStep++;
+    audio.volume = Math.max(initialVolume * (1 - currentStep / steps), 0);
+    if (currentStep >= steps) {
+      clearInterval(interval);
+      audio.pause();
+      audio.volume = initialVolume;
+      if (cb) cb();
+    }
+  }, stepTime);
 }
 
 function flashMusicBoxes() {
@@ -497,7 +532,7 @@ function renderMusicOverlay() {
 
     const progress = document.createElement('div');
     progress.className = 'music-progress';
-    progress.innerHTML = `<div class="music-progress-bar" id="music-progress-${idx}"></div>`;
+    progress.innerHTML = `<div class="music-buffer-bar" id="music-buffer-${idx}"></div><div class="music-progress-bar" id="music-progress-${idx}"></div>`;
     box.appendChild(progress);
     overlay.appendChild(box);
   });
@@ -582,28 +617,99 @@ function prevMusicPage() {
   }
 }
 
-function playMusic(idx) {
-  if (currentAudio) {
-    currentAudio.pause();
-  }
-  const title = musicList[idx];
-  currentAudio = new Audio('Songs/' + encodeURIComponent(title + '.mp3'));
-  const progressBar = document.getElementById(`music-progress-${idx}`);
-  document.querySelectorAll('.music-progress-bar').forEach(bar => bar.style.width = '0%');
-  document.querySelectorAll('.boxmusic').forEach(box => box.classList.remove('playing'));
-  const selectedBox = document.getElementById(`music-box-${idx}`);
-  if (selectedBox) selectedBox.classList.add('playing');
-  currentAudio.addEventListener('timeupdate', () => {
-    const pct = (currentAudio.currentTime / currentAudio.duration) * 100;
-    progressBar.style.width = pct + '%';
+async function createBufferedAudio(title, idx) {
+  const url = 'Songs/' + encodeURIComponent(title + '.mp3');
+  const meta = JSON.parse(localStorage.getItem('songMeta:' + title) || '{}');
+  const stored = JSON.parse(localStorage.getItem('songChunks:' + title) || '[]').map(base64ToUint8Array);
+  if (!meta.loaded) meta.loaded = stored.reduce((s, b) => s + b.length, 0);
+  if (!meta.total) meta.total = meta.loaded;
+  const mediaSource = new MediaSource();
+  const audio = new Audio();
+  audio.src = URL.createObjectURL(mediaSource);
+  let appended = 0;
+  const chunks = stored.slice();
+  let fetching = false;
+
+  mediaSource.addEventListener('sourceopen', () => {
+    const sb = mediaSource.addSourceBuffer('audio/mpeg');
+    function appendChunk() {
+      if (appended < chunks.length && !sb.updating) {
+        sb.appendBuffer(chunks[appended].buffer);
+        appended++;
+      } else if (meta.loaded >= meta.total) {
+        mediaSource.endOfStream();
+      }
+    }
+    sb.addEventListener('updateend', appendChunk);
+    appendChunk();
+
+    async function fetchMore() {
+      if (fetching || meta.loaded >= meta.total) return;
+      fetching = true;
+      const start = meta.loaded;
+      const end = Math.min(start + CHUNK_SIZE, meta.total) - 1;
+      try {
+        const res = await fetch(url, { headers: { Range: `bytes=${start}-${end}` } });
+        const buf = await res.arrayBuffer();
+        meta.loaded += buf.byteLength;
+        const b64 = arrayBufferToBase64(buf);
+        const storedChunks = JSON.parse(localStorage.getItem('songChunks:' + title) || '[]');
+        storedChunks.push(b64);
+        localStorage.setItem('songChunks:' + title, JSON.stringify(storedChunks));
+        localStorage.setItem('songMeta:' + title, JSON.stringify(meta));
+        chunks.push(new Uint8Array(buf));
+        appendChunk();
+      } finally {
+        fetching = false;
+      }
+    }
+
+    audio.addEventListener('timeupdate', () => {
+      const buffered = audio.buffered.length ? audio.buffered.end(0) : 0;
+      const bufferBar = document.getElementById(`music-buffer-${idx}`);
+      if (bufferBar && audio.duration) {
+        bufferBar.style.width = (buffered / audio.duration) * 100 + '%';
+      }
+      const progressBar = document.getElementById(`music-progress-${idx}`);
+      if (progressBar && audio.duration) {
+        progressBar.style.width = (audio.currentTime / audio.duration) * 100 + '%';
+      }
+      if (audio.duration && buffered - audio.currentTime < BUFFER_MARGIN) {
+        fetchMore();
+      }
+    });
+
+    fetchMore();
   });
-  currentAudio.addEventListener('ended', () => {
+
+  audio.addEventListener('ended', () => {
     disableAllButtons(false);
     document.querySelectorAll('.boxmusic').forEach(box => box.classList.remove('playing'));
     currentAudio = null;
   });
-  disableAllButtons(true);
-  currentAudio.play();
+
+  return audio;
+}
+
+async function playMusic(idx) {
+  const startPlayback = async () => {
+    const title = musicList[idx];
+    currentAudio = await createBufferedAudio(title, idx);
+    document.querySelectorAll('.music-progress-bar').forEach(bar => bar.style.width = '0%');
+    document.querySelectorAll('.music-buffer-bar').forEach(bar => bar.style.width = '0%');
+    document.querySelectorAll('.boxmusic').forEach(box => box.classList.remove('playing'));
+    const selectedBox = document.getElementById(`music-box-${idx}`);
+    if (selectedBox) selectedBox.classList.add('playing');
+    disableAllButtons(true);
+    currentAudio.play();
+  };
+  if (currentAudio) {
+    const old = currentAudio;
+    currentAudio = null;
+    fadeOut(old, startPlayback);
+  } else {
+    startPlayback();
+  }
 }
 
 function updateToggleSequence(idx) {
@@ -627,10 +733,12 @@ function updatePauseSequence(idx) {
   if (idx === pauseSequence[pauseIndex]) {
     pauseIndex++;
     if (pauseIndex === pauseSequence.length) {
-      currentAudio.pause();
-      disableAllButtons(false);
-      document.querySelectorAll('.boxmusic').forEach(box => box.classList.remove('playing'));
+      const toPause = currentAudio;
       currentAudio = null;
+      fadeOut(toPause, () => {
+        disableAllButtons(false);
+        document.querySelectorAll('.boxmusic').forEach(box => box.classList.remove('playing'));
+      });
       pauseIndex = 0;
     }
   } else {
