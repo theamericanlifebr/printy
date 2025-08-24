@@ -11,6 +11,7 @@
   <header class="main-header fade">
     <nav>
       <ul>
+        <li><button id="menu-items">Itens</button></li>
         <li><button id="menu-music">Músicas</button></li>
         <li><button id="menu-bags">Bags</button></li>
         <li><button id="menu-more">Mais</button></li>
@@ -41,6 +42,13 @@
   </div>
 
   <div id="music-overlay" class="music-overlay"></div>
+  <div id="items-overlay" class="items-overlay"></div>
+  <div id="item-action-menu" class="item-action-menu">
+    <div class="menu-box">
+      <button class="lavar-btn" onclick="selectItemAction('lavar')">Lavar</button>
+      <button class="consertar-btn" onclick="selectItemAction('consertar')">Consertar</button>
+    </div>
+  </div>
   <div id="loader-overlay" class="loader-overlay">
     <div class="loader-circle">
       <svg width="150" height="150">
